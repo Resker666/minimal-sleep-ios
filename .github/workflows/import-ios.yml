@@ -1,0 +1,61 @@
+name: Import prepared iOS branches
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/import-ios.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: github.repository == 'Resker666/minimal-sleep-ios' && github.event.created
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ github.token }}
+      IMPORT_SOURCE: https://github.com/Resker666/minimal-sleep.git
+      IMPORT_DESTINATION: https://github.com/Resker666/minimal-sleep-ios.git
+      IOS_MAIN_SHA: f4dca00c24839f44489a6b9fc355697f180275f1
+      IOS_RECORDING_SHA: 786a5b52a59ba37e761d91ad789326b5fbff6a26
+    steps:
+      - name: Import the two verified branch histories
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init --quiet
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git config credential.useHttpPath true
+          git config 'credential.https://github.com/Resker666/minimal-sleep-ios.git.helper' \
+            '!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f'
+          export GIT_TERMINAL_PROMPT=0
+
+          git fetch --no-tags "$IMPORT_SOURCE" \
+            refs/heads/codex/split-ios-main:refs/import/playback \
+            refs/heads/codex/split-ios-night-recording:refs/import/recording
+          test "$(git rev-parse refs/import/playback)" = "$IOS_MAIN_SHA"
+          test "$(git rev-parse refs/import/recording)" = "$IOS_RECORDING_SHA"
+          git merge-base --is-ancestor "$IOS_MAIN_SHA" "$IOS_RECORDING_SHA"
+
+          git fetch --no-tags "$IMPORT_DESTINATION" refs/heads/main:refs/import/seed
+          test "$(git rev-parse refs/import/seed)" = "$GITHUB_SHA"
+          test -z "$(git ls-remote --heads "$IMPORT_DESTINATION" refs/heads/codex/ios-night-recording)"
+          seed_workflow=.github/workflows/import-ios.yml
+          seed_blob=$(git rev-parse "$GITHUB_SHA:$seed_workflow")
+
+          import_commit() {
+            local source_commit=$1 destination_parent=$2 message=$3
+            git read-tree "$source_commit"
+            # GitHub Actions can import source history with the installed workflow
+            # held constant. Restore the platform workflow via the repository API.
+            git update-index --force-remove .github/workflows/ios-build.yml
+            git update-index --add --cacheinfo "100644,$seed_blob,$seed_workflow"
+            git commit-tree "$(git write-tree)" -p "$destination_parent" -p "$source_commit" -m "$message"
+          }
+
+          main=$(import_commit "$IOS_MAIN_SHA" "$GITHUB_SHA" 'Import the standalone iOS playback branch')
+          recording=$(import_commit "$IOS_RECORDING_SHA" "$main" 'Import the iOS night recording branch')
+          git push --atomic "$IMPORT_DESTINATION" \
+            "$main:refs/heads/main" "$recording:refs/heads/codex/ios-night-recording"
